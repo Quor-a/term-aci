@@ -10,6 +10,7 @@ import android.view.KeyEvent
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.WindowInsets
@@ -27,7 +28,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.view.WindowCompat
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
@@ -50,8 +50,8 @@ import java.util.Locale
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        // 让内容延伸到系统栏（刘海/状态栏），由 Compose 自行处理安全区，避免工具条压到摄像头。
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        // 让内容延伸到系统栏（刘海/状态栏），由 Compose 用 safeDrawing 自行处理安全区，避免工具条压到摄像头。
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         ShellEngine.init(applicationContext)
         installCrashLogger(applicationContext)
@@ -81,7 +81,6 @@ fun logCrash(ctx: Context, where: String, e: Throwable) {
 @Composable
 fun TermApp() {
     val context = LocalContext.current
-    var tab by remember { mutableStateOf(0) }
     MaterialTheme {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Column(
@@ -89,10 +88,6 @@ fun TermApp() {
                     .fillMaxSize()
                     .windowInsetsPadding(WindowInsets.safeDrawing)
             ) {
-                TabRow(selectedTabIndex = tab) {
-                    Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("终端") })
-                }
-                Spacer(Modifier.height(8.dp))
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     TerminalScreen(context)
                 }
