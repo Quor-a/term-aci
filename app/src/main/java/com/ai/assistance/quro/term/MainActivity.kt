@@ -6,14 +6,20 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.IBinder
 import android.util.Log
 import android.view.KeyEvent
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -21,13 +27,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Color as CColor
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
@@ -36,6 +42,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -49,10 +56,31 @@ import java.util.Locale
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // 让内容延伸到系统栏（刘海/状态栏），由 Compose 自行处理安全区，避免工具条压到摄像头。
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         super.onCreate(savedInstanceState)
         ShellEngine.init(applicationContext)
+        installCrashLogger(applicationContext)
         setContent { TermApp() }
     }
+}
+
+// ── 崩溃落盘（无需 adb，用户用文件管理器即可取到 Download/QuroAI_logs/） ──
+fun installCrashLogger(ctx: Context) {
+    val def = Thread.getDefaultUncaughtExceptionHandler()
+    Thread.setDefaultUncaughtExceptionHandler { t, e ->
+        try { logCrash(ctx, "uncaught@${t.name}", e) } catch (_: Throwable) {}
+        def?.uncaughtException(t, e)
+    }
+}
+
+fun logCrash(ctx: Context, where: String, e: Throwable) {
+    try {
+        val dir = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "QuroAI_logs")
+        dir.mkdirs()
+        val f = File(dir, "termaci_crash_${System.currentTimeMillis()}.txt")
+        f.appendText("=== TermAci crash @ ${Date()} ===\nwhere: $where\n${Log.getStackTraceString(e)}\n\n")
+    } catch (_: Throwable) {}
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -62,7 +90,11 @@ fun TermApp() {
     var tab by remember { mutableStateOf(0) }
     MaterialTheme {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(Modifier.fillMaxSize()) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+            ) {
                 TabRow(selectedTabIndex = tab) {
                     Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("终端") })
                     Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("操控台") })
@@ -130,15 +162,19 @@ fun TerminalScreen(context: Context) {
     val client = remember { TermuxClient() }
     val terminalViewState = remember { mutableStateOf<TerminalView?>(null) }
     val showIme = remember { mutableStateOf(true) }
+    val termError = remember { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxSize()) {
-        // 顶部工具条
+        // 顶部工具条（已处于安全区之内）
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Zorv 终端 · 真 PTY", fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+            Text("Zorv 终端 · 真 PTY", fontSize = 13.sp, fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
+            if (termError.value != null) {
+                TextButton(onClick = { termError.value = null }) { Text("重试") }
+            }
             TextButton(onClick = {
                 val tv = terminalViewState.value ?: return@TextButton
                 val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
@@ -153,42 +189,63 @@ fun TerminalScreen(context: Context) {
                 Text(if (showIme.value) "收起键盘" else "弹出键盘")
             }
         }
-        // 真终端视图（填充剩余空间）
-        AndroidView(
-            modifier = Modifier.fillMaxSize().weight(1f),
-            factory = { ctx ->
-                val view = TerminalView(ctx, null)
-                view.setTerminalViewClient(client)
-                view.isFocusable = true
-                view.isFocusableInTouchMode = true
+        // 真终端视图（全屏黑底，对标 Termux）
+        Box(Modifier.fillMaxSize().weight(1f).background(CColor.Black)) {
+            if (termError.value != null) {
+                Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.Center) {
+                    Text("终端启动失败", color = CColor(0xFFEF5350), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Text(termError.value ?: "", color = CColor.White, fontSize = 12.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Text("日志在 Download/QuroAI_logs/termaci_crash_*.txt", color = CColor.Gray, fontSize = 11.sp)
+                }
+            } else {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { ctx ->
+                        val view = TerminalView(ctx, null)
+                        view.setTerminalViewClient(client)
+                        view.isFocusable = true
+                        view.isFocusableInTouchMode = true
+                        view.setBackgroundColor(Color.BLACK)
+                        // 关键：初始化渲染器（Termux 标准步骤）。漏掉会导致 onMeasure 时
+                        // mRenderer 为 null 而 NPE 闪退。
+                        view.setTextSize(14)
 
-                // 环境：TERM / HOME / PATH / LANG，使 shell 体验接近 Termux
-                val env = mutableListOf<String>()
-                env.add("TERM=xterm-256color")
-                env.add("HOME=" + ctx.filesDir.absolutePath)
-                env.add("LANG=en_US.UTF-8")
-                val sysPath = System.getenv("PATH")
-                if (!sysPath.isNullOrBlank()) env.add("PATH=$sysPath")
-                // 优先 bash，回退 sh
-                val shell = if (Runtime.getRuntime().exec(arrayOf("sh", "-c", "command -v bash")).inputStream.bufferedReader().readLine()?.isNotBlank() == true) "bash" else "/system/bin/sh"
+                        try {
+                            // 环境：TERM / HOME / PATH / LANG，使 shell 体验接近 Termux
+                            val env = mutableListOf<String>()
+                            env.add("TERM=xterm-256color")
+                            env.add("HOME=" + ctx.filesDir.absolutePath)
+                            env.add("LANG=en_US.UTF-8")
+                            val sysPath = System.getenv("PATH")
+                            if (!sysPath.isNullOrBlank()) env.add("PATH=$sysPath")
+                            // 优先 bash，回退 sh
+                            val shell = if (Runtime.getRuntime().exec(arrayOf("sh", "-c", "command -v bash")).inputStream.bufferedReader().readLine()?.isNotBlank() == true) "bash" else "/system/bin/sh"
 
-                val session = TerminalSession(
-                    shell,
-                    ctx.filesDir.absolutePath,
-                    arrayOf(),
-                    env.toTypedArray(),
-                    5000,
-                    client
+                            val session = TerminalSession(
+                                shell,
+                                ctx.filesDir.absolutePath,
+                                arrayOf(),
+                                env.toTypedArray(),
+                                5000,
+                                client
+                            )
+                            view.attachSession(session)
+                            view.requestFocus()
+                            terminalViewState.value = view
+                        } catch (e: Throwable) {
+                            logCrash(ctx, "TerminalSession init", e)
+                            termError.value = "创建 PTY 会话失败：${e.message}"
+                        }
+                        view
+                    },
+                    onRelease = { view ->
+                        try { view.currentSession?.finishIfRunning() } catch (_: Throwable) {}
+                    }
                 )
-                view.attachSession(session)
-                view.requestFocus()
-                terminalViewState.value = view
-                view
-            },
-            onRelease = { view ->
-                view.currentSession?.finishIfRunning()
             }
-        )
+        }
     }
 }
 
@@ -310,28 +367,28 @@ fun ConsoleScreen(context: Context) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
             Column(Modifier.padding(16.dp)) {
-                Text("ACI 受控端状态", style = MaterialTheme.typography.titleSmall, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                Text("ACI 受控端状态", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
-                Text("● 服务：${if (bound.value) "已连接 (AIDL 同进程绑定)" else "未连接"}", fontSize = 13.sp, color = if (bound.value) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error)
+                Text("● 服务：${if (bound.value) "已连接 (AIDL 同进程绑定)" else "未连接"}", fontSize = 13.sp, color = if (bound.value) CColor(0xFF2E7D32) else MaterialTheme.colorScheme.error)
                 Text("● 双通道：AIDL + LocalSocket（抽象命名空间，端点=包名）", fontSize = 13.sp)
                 Text("● 包名：${context.packageName}", fontSize = 13.sp)
                 Text("● 已注册能力数：${caps.value.size}", fontSize = 13.sp)
             }
         }
         Spacer(Modifier.height(16.dp))
-        Text("能力列表", style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+        Text("能力列表", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         caps.value.forEach { c ->
             Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), shape = RoundedCornerShape(10.dp)) {
                 Column(Modifier.padding(12.dp)) {
-                    Text(c.id, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
+                    Text(c.id, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
                     Text(c.description, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
         if (caps.value.isEmpty()) Text("（等待服务连接…）", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(16.dp))
-        Text("手动调用", style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+        Text("手动调用", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         ExposedDropdownMenuBox(expanded = expanded.value, onExpandedChange = { expanded.value = it }) {
             TextField(
@@ -350,13 +407,13 @@ fun ConsoleScreen(context: Context) {
         Spacer(Modifier.height(8.dp))
         Button(onClick = { invokeCapability() }, enabled = bound.value && !invoking.value, modifier = Modifier.fillMaxWidth()) { Text(if (invoking.value) "调用中…" else "执行调用") }
         Spacer(Modifier.height(16.dp))
-        Text("返回结果", style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+        Text("返回结果", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp)) {
             Text(resultText.value, Modifier.padding(12.dp).verticalScroll(rememberScrollState()), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
         }
         Spacer(Modifier.height(16.dp))
-        Text("调用日志", style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+        Text("调用日志", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp)) {
             Text(if (log.value.isBlank()) "（暂无）" else log.value, Modifier.padding(12.dp), fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
