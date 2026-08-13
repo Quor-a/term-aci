@@ -1,0 +1,41 @@
+apply plugin: 'com.android.library'
+
+android {
+    namespace "com.termux.terminal"
+    compileSdk 36
+    ndkVersion "25.1.8937393"
+
+    defaultConfig {
+        minSdk 26
+        targetSdk 36
+
+        externalNativeBuild {
+            ndkBuild {
+                cFlags "-std=c11", "-Wall", "-Os", "-fno-stack-protector", "-Wl,--gc-sections"
+            }
+        }
+
+        ndk {
+            abiFilters 'x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        release { minifyEnabled false }
+    }
+
+    externalNativeBuild {
+        ndkBuild {
+            path "src/main/jni/Android.mk"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    // 无第三方依赖；native libtermux.so 由 ndkBuild 从 src/main/jni/termux.c 构建
+}

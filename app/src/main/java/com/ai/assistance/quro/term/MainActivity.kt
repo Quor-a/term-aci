@@ -8,18 +8,15 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Bundle
 import android.os.IBinder
+import android.util.Log
+import android.view.KeyEvent
+import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -27,18 +24,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.input.key.KeyEvent
-import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.termux.terminal.TerminalSession
+import com.termux.terminal.TerminalSessionClient
+import com.termux.view.TerminalView
+import com.termux.view.TerminalViewClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -47,7 +44,7 @@ import java.util.Locale
  * 终端 App 主界面（Jetpack Compose）。既可作为 Zorv AI 的 ACI 受控端（本地 shell），也可独立使用。
  *
  * 两个 Tab：
- *  - 终端：交互式 shell（命令输入 / 输出日志 / cwd 显示 / 历史 ↑↓），对标 Termux 的本地终端。
+ *  - 终端：基于 Termux terminal-view 的**真·PTY 终端**（bash/sh、ANSI 颜色、交互式程序、cd/env 跨命令保留），对标 Termux。
  *  - 操控台：自绑定 ACI Service（同进程 AIDL），可视化能力列表与手动调 call()。
  */
 class MainActivity : ComponentActivity() {
@@ -82,114 +79,116 @@ fun TermApp() {
     }
 }
 
-// ───────────────────────── 终端 Tab ─────────────────────────
+// ───────────────────────── 终端 Tab（真·PTY） ─────────────────────────
 
-private enum class LineKind { INPUT, OUTPUT, SYSTEM }
+/**
+ * 整合 Termux terminal-view 的客户端回调（同时实现 Session 与 View 两个接口）。
+ * 渲染由 TerminalView 自行完成，这里只做必要的无操作回调 + 日志。
+ */
+private class TermuxClient : TerminalSessionClient, TerminalViewClient {
+    // ── TerminalSessionClient ──
+    override fun onTextChanged(changedSession: TerminalSession) {}
+    override fun onTitleChanged(changedSession: TerminalSession) {}
+    override fun onSessionFinished(finishedSession: TerminalSession) {}
+    override fun onCopyTextToClipboard(session: TerminalSession, text: String) {}
+    override fun onPasteTextFromClipboard(session: TerminalSession) {}
+    override fun onBell(session: TerminalSession) {}
+    override fun onColorsChanged(session: TerminalSession) {}
+    override fun onTerminalCursorStateChange(state: Boolean) {}
+    override fun getTerminalCursorStyle(): Int? = null
 
-private data class TermLine(val text: String, val kind: LineKind)
+    // ── TerminalViewClient ──
+    override fun onScale(scale: Float): Float = scale
+    override fun onSingleTapUp(e: android.view.MotionEvent) {}
+    override fun shouldBackButtonBeMappedToEscape(): Boolean = false
+    override fun shouldEnforceCharBasedInput(): Boolean = false
+    override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
+    override fun isTerminalViewSelected(): Boolean = true
+    override fun copyModeChanged(copyMode: Boolean) {}
+    override fun onKeyDown(keyCode: Int, e: KeyEvent, session: TerminalSession): Boolean = false
+    override fun onKeyUp(keyCode: Int, e: KeyEvent): Boolean = false
+    override fun onLongPress(event: android.view.MotionEvent): Boolean = false
+    override fun readControlKey(): Boolean = false
+    override fun readAltKey(): Boolean = false
+    override fun readShiftKey(): Boolean = false
+    override fun readFnKey(): Boolean = false
+    override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession): Boolean = false
+    override fun onEmulatorSet() {}
 
-@OptIn(ExperimentalMaterial3Api::class)
+    // ── 日志 ──
+    override fun logError(tag: String, message: String) { Log.e(tag, message) }
+    override fun logWarn(tag: String, message: String) { Log.w(tag, message) }
+    override fun logInfo(tag: String, message: String) { Log.i(tag, message) }
+    override fun logDebug(tag: String, message: String) { Log.d(tag, message) }
+    override fun logVerbose(tag: String, message: String) { Log.v(tag, message) }
+    override fun logStackTraceWithMessage(tag: String, message: String, e: Exception) { Log.e(tag, message, e) }
+    override fun logStackTrace(tag: String, e: Exception) { Log.e(tag, "", e) }
+}
+
 @Composable
 fun TerminalScreen(context: Context) {
-    val scope = rememberCoroutineScope()
-    val lines = remember { mutableStateOf<List<TermLine>>(listOf(TermLine("TermAci 本地终端已就绪 · 输入命令后回车执行（cd / clear / pwd 为内置）", LineKind.SYSTEM)) ) }
-    val input = remember { mutableStateOf(TextFieldValue("")) }
-    val history = remember { mutableStateOf<List<String>>(emptyList()) }
-    val histIdx = remember { mutableStateOf(-1) }
-    val busy = remember { mutableStateOf(false) }
-    val listState = rememberLazyListState()
+    val client = remember { TermuxClient() }
+    val terminalViewState = remember { mutableStateOf<TerminalView?>(null) }
+    val showIme = remember { mutableStateOf(true) }
 
-    fun append(line: TermLine) { lines.value = lines.value + line }
-
-    fun runCommand(raw: String) {
-        val cmd = raw.trim()
-        if (cmd.isEmpty()) return
-        history.value = history.value + cmd
-        histIdx.value = history.value.size
-        append(TermLine("❯ $cmd", LineKind.INPUT))
-        when {
-            cmd == "clear" -> lines.value = emptyList()
-            cmd == "pwd" -> append(TermLine(ShellEngine.getCwd(), LineKind.OUTPUT))
-            cmd.startsWith("cd") -> {
-                val target = cmd.removePrefix("cd").trim()
-                val base = ShellEngine.getCwd()
-                val newDir = if (target.isEmpty()) base else try { File(base, target).canonicalPath } catch (_: Throwable) { base }
-                val ok = ShellEngine.setCwd(newDir)
-                append(TermLine(if (ok) "→ $newDir" else "cd: 无法访问 $newDir", LineKind.SYSTEM))
-            }
-            else -> {
-                busy.value = true
-                scope.launch(Dispatchers.IO) {
-                    val r = ShellEngine.exec(cmd)
-                    val out = if (r.stdout.isEmpty()) "(无输出)" else r.stdout
-                    withContext(Dispatchers.Main) {
-                        out.split("\n").forEach { append(TermLine(it, LineKind.OUTPUT)) }
-                        if (r.timedOut) append(TermLine("[TermAci] 命令超时已终止", LineKind.SYSTEM))
-                        append(TermLine("[exit ${if (r.timedOut) "TIMEOUT" else r.exitCode}]", LineKind.SYSTEM))
-                        busy.value = false
-                    }
+    Column(Modifier.fillMaxSize()) {
+        // 顶部工具条
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Zorv 终端 · 真 PTY", fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
+            TextButton(onClick = {
+                val tv = terminalViewState.value ?: return@TextButton
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                if (showIme.value) {
+                    tv.requestFocus()
+                    imm.showSoftInput(tv, InputMethodManager.SHOW_IMPLICIT)
+                } else {
+                    imm.hideSoftInputFromWindow(tv.windowToken, 0)
                 }
+                showIme.value = !showIme.value
+            }) {
+                Text(if (showIme.value) "收起键盘" else "弹出键盘")
             }
         }
-    }
+        // 真终端视图（填充剩余空间）
+        AndroidView(
+            modifier = Modifier.fillMaxSize().weight(1f),
+            factory = { ctx ->
+                val view = TerminalView(ctx, null)
+                view.setTerminalViewClient(client)
+                view.isFocusable = true
+                view.isFocusableInTouchMode = true
 
-    // 自动滚到底部
-    LaunchedEffect(lines.value.size) {
-        if (lines.value.isNotEmpty()) listState.scrollToItem(lines.value.size - 1)
-    }
+                // 环境：TERM / HOME / PATH / LANG，使 shell 体验接近 Termux
+                val env = mutableListOf<String>()
+                env.add("TERM=xterm-256color")
+                env.add("HOME=" + ctx.filesDir.absolutePath)
+                env.add("LANG=en_US.UTF-8")
+                val sysPath = System.getenv("PATH")
+                if (!sysPath.isNullOrBlank()) env.add("PATH=$sysPath")
+                // 优先 bash，回退 sh
+                val shell = if (Runtime.getRuntime().exec(arrayOf("sh", "-c", "command -v bash")).inputStream.bufferedReader().readLine()?.isNotBlank() == true) "bash" else "/system/bin/sh"
 
-    val promptColor = MaterialTheme.colorScheme.primary
-    val outColor = MaterialTheme.colorScheme.onSurface
-    val sysColor = MaterialTheme.colorScheme.onSurfaceVariant
-
-    Column(Modifier.fillMaxSize().padding(8.dp)) {
-        // 状态条：cwd + 快捷
-        Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("📂 ${ShellEngine.getCwd()}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-            TextButton(onClick = { runCommand("pwd") }) { Text("pwd") }
-            TextButton(onClick = { runCommand("ls -la") }) { Text("ls") }
-            TextButton(onClick = { runCommand("clear") }) { Text("clear") }
-        }
-        Spacer(Modifier.height(6.dp))
-        // 输出区
-        LazyColumn(Modifier.fillMaxWidth().weight(1f).background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp)).padding(8.dp), state = listState) {
-            items(lines.value) { l ->
-                val color = when (l.kind) { LineKind.INPUT -> promptColor; LineKind.SYSTEM -> sysColor; else -> outColor }
-                val weight = if (l.kind == LineKind.INPUT) FontWeight.Bold else FontWeight.Normal
-                Text(l.text, fontSize = 13.sp, fontFamily = FontFamily.Monospace, color = color, fontWeight = weight)
+                val session = TerminalSession(
+                    shell,
+                    ctx.filesDir.absolutePath,
+                    arrayOf(),
+                    env.toTypedArray(),
+                    5000,
+                    client
+                )
+                view.attachSession(session)
+                view.requestFocus()
+                terminalViewState.value = view
+                view
+            },
+            onRelease = { view ->
+                view.currentSession?.finishIfRunning()
             }
-        }
-        Spacer(Modifier.height(6.dp))
-        // 输入区
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("❯", fontSize = 15.sp, fontFamily = FontFamily.Monospace, color = promptColor, modifier = Modifier.padding(end = 6.dp))
-            OutlinedTextField(
-                value = input.value,
-                onValueChange = { input.value = it },
-                modifier = Modifier.weight(1f)                .onPreviewKeyEvent { ev ->
-                    if (ev.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP && ev.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN) {
-                        val h = history.value
-                        if (h.isNotEmpty()) {
-                            histIdx.value = (histIdx.value - 1).coerceAtLeast(0)
-                            input.value = TextFieldValue(h[histIdx.value], TextRange(h[histIdx.value].length))
-                        }
-                        true
-                    } else if (ev.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN && ev.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN) {
-                        val h = history.value
-                        if (histIdx.value in 0 until h.size) {
-                            histIdx.value = (histIdx.value + 1).coerceAtMost(h.size)
-                            input.value = if (histIdx.value == h.size) TextFieldValue("") else TextFieldValue(h[histIdx.value], TextRange(h[histIdx.value].length))
-                        }
-                        true
-                    } else false
-                },
-                placeholder = { Text("输入 shell 命令…（↑↓ 翻历史）") },
-                singleLine = true,
-                enabled = !busy.value
-            )
-            Spacer(Modifier.width(6.dp))
-            Button(onClick = { val c = input.value.text; input.value = TextFieldValue(""); runCommand(c) }, enabled = !busy.value) { Text("执行") }
-        }
+        )
     }
 }
 
@@ -311,7 +310,7 @@ fun ConsoleScreen(context: Context) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
             Column(Modifier.padding(16.dp)) {
-                Text("ACI 受控端状态", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Text("ACI 受控端状态", style = MaterialTheme.typography.titleSmall, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
                 Text("● 服务：${if (bound.value) "已连接 (AIDL 同进程绑定)" else "未连接"}", fontSize = 13.sp, color = if (bound.value) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error)
                 Text("● 双通道：AIDL + LocalSocket（抽象命名空间，端点=包名）", fontSize = 13.sp)
@@ -320,19 +319,19 @@ fun ConsoleScreen(context: Context) {
             }
         }
         Spacer(Modifier.height(16.dp))
-        Text("能力列表", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text("能力列表", style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         caps.value.forEach { c ->
             Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), shape = RoundedCornerShape(10.dp)) {
                 Column(Modifier.padding(12.dp)) {
-                    Text(c.id, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
+                    Text(c.id, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
                     Text(c.description, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
         if (caps.value.isEmpty()) Text("（等待服务连接…）", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(16.dp))
-        Text("手动调用", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text("手动调用", style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         ExposedDropdownMenuBox(expanded = expanded.value, onExpandedChange = { expanded.value = it }) {
             TextField(
@@ -351,24 +350,17 @@ fun ConsoleScreen(context: Context) {
         Spacer(Modifier.height(8.dp))
         Button(onClick = { invokeCapability() }, enabled = bound.value && !invoking.value, modifier = Modifier.fillMaxWidth()) { Text(if (invoking.value) "调用中…" else "执行调用") }
         Spacer(Modifier.height(16.dp))
-        Text("返回结果", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text("返回结果", style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp)) {
-            Text(resultText.value, Modifier.padding(12.dp).verticalScroll(rememberScrollState()), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+            Text(resultText.value, Modifier.padding(12.dp).verticalScroll(rememberScrollState()), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
         }
         Spacer(Modifier.height(16.dp))
-        Text("调用日志", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text("调用日志", style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
         Spacer(Modifier.height(8.dp))
         Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp)) {
-            Text(if (log.value.isBlank()) "（暂无）" else log.value, Modifier.padding(12.dp), fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(if (log.value.isBlank()) "（暂无）" else log.value, Modifier.padding(12.dp), fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.height(16.dp))
     }
-}
-
-// ── 工具 ──────────────────────────────────────────────────
-
-private fun fmtTime(ms: Long): String {
-    if (ms <= 0L) return "--"
-    return try { SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(ms)) } catch (_: Throwable) { "--" }
 }

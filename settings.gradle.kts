@@ -20,3 +20,5 @@ dependencyResolutionManagement {
 rootProject.name = "TermACI"
 include(":app")
 include(":aidl-aci-core")
+include(":terminal-emulator")
+include(":terminal-view")

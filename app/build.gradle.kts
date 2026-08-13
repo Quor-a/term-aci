@@ -73,4 +73,8 @@ dependencies {
     // 协程（UI 层后台执行 shell）
     implementation(libs.coroutines.android)
     implementation(libs.coroutines.core)
+
+    // 真·PTY 终端：本地 vendored Termux terminal-view + terminal-emulator（native libtermux.so 由 NDK 构建）
+    // 对标 Termux 的真实交互终端：bash/sh、ANSI 颜色、交互式程序、cd/env 跨命令保留。
+    implementation(project(":terminal-view"))
 }
