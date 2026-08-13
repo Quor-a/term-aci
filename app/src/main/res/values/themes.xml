@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.TermAci" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#1B5E20</item>
+        <item name="android:colorAccent">#1B5E20</item>
+        <item name="android:statusBarColor">#14401a</item>
+    </style>
+</resources>
