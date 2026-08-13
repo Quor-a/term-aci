@@ -43,7 +43,7 @@ import java.util.Locale
 /**
  * 终端 App 主界面（Jetpack Compose）。既可作为 Zorv AI 的 ACI 受控端（本地 shell），也可独立使用。
  *
- * 基于 Termux terminal-view 的**真·PTY 终端**（bash/sh、ANSI 颜色、交互式程序、cd/env 跨命令保留），对标 Termux。
+ * 基于 Termux terminal-view 的**真·PTY 终端**（bash/sh、ANSI 颜色、交互式程序、cd/env 跨命令保留）。
  *
  * 注意：控制台（操控台）是**控制端**功能，本 App 不再内置调试台；由控制端经 ACI 能力
  * console_ui / console_action 拉取 TermAciConsoleBackend 的 SDUI 快照并由 AciConsoleScreen 渲染。
@@ -174,7 +174,7 @@ fun TerminalScreen(context: Context) {
                 Text(if (showIme.value) "收起键盘" else "弹出键盘")
             }
         }
-        // 真终端视图（全屏黑底，对标 Termux）
+        // 真终端视图（全屏黑底）
         Box(Modifier.fillMaxSize().weight(1f).background(CColor.Black)) {
             if (termError.value != null) {
                 Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.Center) {
