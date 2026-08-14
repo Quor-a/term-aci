@@ -1,5 +1,7 @@
 package com.ai.assistance.quro.term
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
 import android.os.Build
@@ -7,6 +9,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.util.Log
 import android.view.KeyEvent
+import android.widget.Toast
 import android.view.View
 import android.view.WindowInsets as AndroidWindowInsets
 import android.view.WindowManager
@@ -123,6 +126,14 @@ private fun HelpDialog(onDismiss: () -> Unit) {
                     Text("· 支持 vim、top、mc 等交互式程序")
                 }
                 Spacer(Modifier.height(12.dp))
+                HelpSection("选择与编辑") {
+                    Text("· 长按终端文字进入选区，拖动两端手柄调整范围")
+                    Text("· 选区浮层菜单可「复制 / 粘贴」（已接入系统剪贴板）")
+                    Text("· 展开工具条按钮：复制选中、粘贴、字号 －/＋、清屏")
+                    Text("· 双指捏合可缩放字体（等价于 －/＋ 按钮）")
+                    Text("· 复制/粘贴在 bash、vim 等场景下均可用")
+                }
+                Spacer(Modifier.height(12.dp))
                 HelpSection("存储访问") {
                     Text("终端拥有 MANAGE_EXTERNAL_STORAGE 权限时可直接读写 /storage/emulated/0；")
                     Text("否则仅能在 HOME（应用私有目录）和 SAF 授权目录操作。")
@@ -170,13 +181,32 @@ fun TermApp() {
  * 整合 Termux terminal-view 的客户端回调（同时实现 Session 与 View 两个接口）。
  * 渲染由 TerminalView 自行完成，这里只做必要的无操作回调 + 日志。
  */
-private class TermuxClient : TerminalSessionClient, TerminalViewClient {
+private class TermuxClient(private val ctx: Context) : TerminalSessionClient, TerminalViewClient {
     // ── TerminalSessionClient ──
     override fun onTextChanged(changedSession: TerminalSession) {}
     override fun onTitleChanged(changedSession: TerminalSession) {}
     override fun onSessionFinished(finishedSession: TerminalSession) {}
-    override fun onCopyTextToClipboard(session: TerminalSession, text: String) {}
-    override fun onPasteTextFromClipboard(session: TerminalSession) {}
+    override fun onCopyTextToClipboard(session: TerminalSession, text: String) {
+        // 选区浮层菜单「复制」、以及 getSelectedTextString() 复制共用此回调。
+        try {
+            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("TermAci", text))
+        } catch (_: Throwable) {}
+    }
+    override fun onPasteTextFromClipboard(session: TerminalSession) {
+        // 选区浮层菜单「粘贴」回调：读取系统剪贴板写入当前会话。
+        try {
+            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip ?: return
+            val sb = StringBuilder()
+            for (i in 0 until clip.itemCount) sb.append(clip.getItemAt(i).coerceToText(ctx))
+            val data = sb.toString()
+            if (data.isNotEmpty()) {
+                val bytes = data.toByteArray(Charsets.UTF_8)
+                session.write(bytes, 0, bytes.size)
+            }
+        } catch (_: Throwable) {}
+    }
     override fun onBell(session: TerminalSession) {}
     override fun onColorsChanged(session: TerminalSession) {}
     override fun onTerminalCursorStateChange(state: Boolean) {}
@@ -212,12 +242,61 @@ private class TermuxClient : TerminalSessionClient, TerminalViewClient {
 
 @Composable
 fun TerminalScreen(context: Context) {
-    val client = remember { TermuxClient() }
+    val client = remember { TermuxClient(context) }
     val terminalViewState = remember { mutableStateOf<TerminalView?>(null) }
     val showIme = remember { mutableStateOf(true) }
     val termError = remember { mutableStateOf<String?>(null) }
     var toolbarExpanded by remember { mutableStateOf(false) }
     var showHelp by remember { mutableStateOf(false) }
+    // 字号状态（与 TerminalView.setTextSize 同步），用于缩放按钮。
+    var textSize by remember { mutableStateOf(14) }
+    val clipboard = remember { context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
+
+    fun copySelected() {
+        val tv = terminalViewState.value ?: return
+        val text = tv.getSelectedTextString()
+        if (text.isBlank()) {
+            Toast.makeText(context, "未选中文本（长按可进入选区）", Toast.LENGTH_SHORT).show()
+            return
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText("TermAci", text))
+        tv.stopTextSelectionMode()
+        Toast.makeText(context, "已复制 ${text.length} 字符", Toast.LENGTH_SHORT).show()
+    }
+
+    fun paste() {
+        val tv = terminalViewState.value ?: return
+        val session = tv.getCurrentSession() ?: return
+        val clip = clipboard.primaryClip
+        if (clip == null || clip.itemCount == 0) {
+            Toast.makeText(context, "剪贴板为空", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val sb = StringBuilder()
+        for (i in 0 until clip.itemCount) sb.append(clip.getItemAt(i).coerceToText(context))
+        val data = sb.toString()
+        if (data.isNotEmpty()) {
+            val bytes = data.toByteArray(Charsets.UTF_8)
+            session.write(bytes, 0, bytes.size)
+        }
+        Toast.makeText(context, "已粘贴 ${data.length} 字符", Toast.LENGTH_SHORT).show()
+    }
+
+    fun zoom(delta: Int) {
+        val tv = terminalViewState.value ?: return
+        val newSize = (textSize + delta).coerceIn(8, 40)
+        textSize = newSize
+        tv.setTextSize(newSize)
+        Toast.makeText(context, "字号 $newSize", Toast.LENGTH_SHORT).show()
+    }
+
+    fun clearScreen() {
+        val tv = terminalViewState.value ?: return
+        val session = tv.getCurrentSession() ?: return
+        val seq = "\u001b[2J\u001b[3J\u001b[H".toByteArray(Charsets.UTF_8)
+        session.write(seq, 0, seq.size)
+        tv.invalidate()
+    }
 
     Box(Modifier.fillMaxSize().background(CColor.Black)) {
         // 真终端视图（全屏黑底）
@@ -291,45 +370,61 @@ fun TerminalScreen(context: Context) {
                 )
             }
             AnimatedVisibility(visible = toolbarExpanded) {
-                Row(
+                Column(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
-                    Text(
-                        "真 PTY · bash/sh · ANSI 颜色",
-                        fontSize = 12.sp,
-                        color = CColor(0xFFCCCCCC),
-                        modifier = Modifier.weight(1f)
-                    )
-                    if (termError.value != null) {
-                        TextButton(onClick = { termError.value = null }) { Text("重试", color = CColor(0xFFEF5350)) }
-                    }
-                    IconButton(
-                        onClick = { showHelp = true },
-                        modifier = Modifier.size(32.dp)
-                    ) { Icon(Icons.Filled.Help, contentDescription = "帮助", tint = CColor.White) }
-                    IconButton(
-                        onClick = {
-                            val tv = terminalViewState.value ?: return@IconButton
-                            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                            if (showIme.value) {
-                                tv.requestFocus()
-                                imm.showSoftInput(tv, InputMethodManager.SHOW_IMPLICIT)
-                            } else {
-                                imm.hideSoftInputFromWindow(tv.windowToken, 0)
-                            }
-                            showIme.value = !showIme.value
-                        },
-                        modifier = Modifier.size(32.dp)
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Icon(
-                            imageVector = if (showIme.value) Icons.Default.KeyboardHide else Icons.Default.Keyboard,
-                            contentDescription = "切换键盘",
-                            tint = CColor.White
+                        Text(
+                            "真 PTY · bash/sh · ANSI 颜色",
+                            fontSize = 12.sp,
+                            color = CColor(0xFFCCCCCC),
+                            modifier = Modifier.weight(1f)
                         )
+                        if (termError.value != null) {
+                            TextButton(onClick = { termError.value = null }) { Text("重试", color = CColor(0xFFEF5350)) }
+                        }
+                        IconButton(
+                            onClick = { showHelp = true },
+                            modifier = Modifier.size(32.dp)
+                        ) { Icon(Icons.Filled.Help, contentDescription = "帮助", tint = CColor.White) }
+                        IconButton(
+                            onClick = {
+                                val tv = terminalViewState.value ?: return@IconButton
+                                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                                if (showIme.value) {
+                                    tv.requestFocus()
+                                    imm.showSoftInput(tv, InputMethodManager.SHOW_IMPLICIT)
+                                } else {
+                                    imm.hideSoftInputFromWindow(tv.windowToken, 0)
+                                }
+                                showIme.value = !showIme.value
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (showIme.value) Icons.Default.KeyboardHide else Icons.Default.Keyboard,
+                                contentDescription = "切换键盘",
+                                tint = CColor.White
+                            )
+                        }
+                    }
+                    // 第二行：Termux 式编辑操作
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        TextButton(onClick = { copySelected() }) { Text("复制", color = CColor.White, fontSize = 12.sp) }
+                        TextButton(onClick = { paste() }) { Text("粘贴", color = CColor.White, fontSize = 12.sp) }
+                        TextButton(onClick = { zoom(-1) }) { Text("－", color = CColor.White, fontSize = 13.sp) }
+                        TextButton(onClick = { zoom(1) }) { Text("＋", color = CColor.White, fontSize = 13.sp) }
+                        TextButton(onClick = { clearScreen() }) { Text("清屏", color = CColor(0xFFEF5350), fontSize = 12.sp) }
                     }
                 }
             }

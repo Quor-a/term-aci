@@ -933,6 +933,15 @@ public final class TerminalView extends View {
         return mEmulator.getScreen().getSelectedText(0, mTopRow, mEmulator.mColumns, mTopRow + mEmulator.mRows);
     }
 
+    /** 公开：获取当前文本选择区的字符串（用于复制）。未选区时返回空串。 */
+    public String getSelectedTextString() {
+        if (mEmulator == null) return "";
+        if (isSelectingText() && mTextSelectionCursorController != null) {
+            return mTextSelectionCursorController.getSelectedText();
+        }
+        return "";
+    }
+
     public int getCursorX(float x) {
         return (int) (x / mRenderer.mFontWidth);
     }

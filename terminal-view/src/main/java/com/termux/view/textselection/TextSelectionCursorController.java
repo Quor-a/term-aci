@@ -104,7 +104,14 @@ public class TextSelectionCursorController implements CursorController {
             }
         }
     }
-    
+
+    /** 公开：返回当前文本选区字符串（与浮层菜单「复制」使用同一选区坐标）。未激活选区时返回空串。 */
+    public String getSelectedText() {
+        if (!mIsSelectingText) return "";
+        String text = terminalView.mEmulator.getSelectedText(mSelX1, mSelY1, mSelX2, mSelY2);
+        return text == null ? "" : text.trim();
+    }
+
     public void setActionModeCallBacks() {
         final ActionMode.Callback callback = new ActionMode.Callback() {
             @Override
