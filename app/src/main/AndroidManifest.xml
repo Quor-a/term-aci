@@ -13,7 +13,14 @@
     <permission android:name="ai.aci.permission.CALL_DANGEROUS" tools:node="remove" />
     <permission android:name="ai.aci.permission.DISCOVER"      tools:node="remove" />
 
-    <!-- 终端受控端：本地 shell 执行，无需网络/定位权限 -->
+    <!-- 终端受控端：本地 shell 执行，需访问设备存储（终端要读写 /storage/emulated/0 下的文件） -->
+
+    <!-- 文件管理权限：Android 11+「管理所有文件」，允许终端访问设备共享存储 -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />
+    <!-- 媒体读取（终端读取设备图片/视频/音频） -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
     <!-- 仅引用控制端已定义的 ACI 权限（定义权归 ZorvAI） -->
     <uses-permission android:name="ai.aci.permission.CALL" />
