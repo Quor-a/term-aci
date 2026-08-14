@@ -7,17 +7,27 @@ import android.os.Bundle
 import android.os.Environment
 import android.util.Log
 import android.view.KeyEvent
+import android.view.View
+import android.view.WindowInsets as AndroidWindowInsets
+import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Help
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.KeyboardHide
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -28,6 +38,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
@@ -50,9 +63,14 @@ import java.util.Locale
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        // 让内容延伸到系统栏（刘海/状态栏），由 Compose 用 safeDrawing 自行处理安全区，避免工具条压到摄像头。
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // 彻底禁用系统 ActionBar / Title，避免部分 ROM 在 NoActionBar theme 下仍显示「终端」标题栏。
+        actionBar?.hide()
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        insetsController.isAppearanceLightStatusBars = false
+        insetsController.isAppearanceLightNavigationBars = false
         ShellEngine.init(applicationContext)
         installCrashLogger(applicationContext)
         setContent { TermApp() }
@@ -77,20 +95,70 @@ fun logCrash(ctx: Context, where: String, e: Throwable) {
     } catch (_: Throwable) {}
 }
 
+// ── 帮助文档 ─────────────────────────────────────────────────────────
+
+@Composable
+private fun HelpDialog(onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Zorv 终端 使用说明") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                HelpSection("环境变量") {
+                    Text("HOME = 应用私有目录")
+                    Text("TERM = xterm-256color")
+                    Text("LANG = en_US.UTF-8")
+                    Text("PATH = 继承系统 PATH")
+                }
+                Spacer(Modifier.height(12.dp))
+                HelpSection("可用 Shell") {
+                    Text("优先 bash；未找到 bash 时回退 /system/bin/sh。")
+                    Text("cd、export、alias 等状态跨命令保留。")
+                }
+                Spacer(Modifier.height(12.dp))
+                HelpSection("交互操作") {
+                    Text("· 点击终端区域获取焦点")
+                    Text("· 顶部把手展开/收起工具条")
+                    Text("· 工具条可切换软键盘显示/隐藏")
+                    Text("· 支持 vim、top、mc 等交互式程序")
+                }
+                Spacer(Modifier.height(12.dp))
+                HelpSection("存储访问") {
+                    Text("终端拥有 MANAGE_EXTERNAL_STORAGE 权限时可直接读写 /storage/emulated/0；")
+                    Text("否则仅能在 HOME（应用私有目录）和 SAF 授权目录操作。")
+                }
+                Spacer(Modifier.height(12.dp))
+                HelpSection("后台任务（ACI 能力）") {
+                    Text("控制端可调 term_exec / term_exec_bg / term_jobs / term_job_output / term_kill。")
+                }
+                Spacer(Modifier.height(12.dp))
+                HelpSection("故障排查") {
+                    Text("崩溃日志自动写入 Download/QuroAI_logs/termaci_crash_*.txt")
+                    Text("无需 adb，用手机文件管理器即可查看。")
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+@Composable
+private fun HelpSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column {
+        Text(title, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(4.dp))
+        Column(content = content)
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TermApp() {
     val context = LocalContext.current
-    MaterialTheme {
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
-            ) {
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    TerminalScreen(context)
-                }
+    MaterialTheme(colorScheme = darkColorScheme()) {
+        Surface(Modifier.fillMaxSize(), color = CColor.Black) {
+            Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                TerminalScreen(context)
             }
         }
     }
@@ -148,89 +216,128 @@ fun TerminalScreen(context: Context) {
     val terminalViewState = remember { mutableStateOf<TerminalView?>(null) }
     val showIme = remember { mutableStateOf(true) }
     val termError = remember { mutableStateOf<String?>(null) }
+    var toolbarExpanded by remember { mutableStateOf(false) }
+    var showHelp by remember { mutableStateOf(false) }
 
-    Column(Modifier.fillMaxSize()) {
-        // 顶部工具条（已处于安全区之内）
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Zorv 终端 · 真 PTY", fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.primary, modifier = Modifier.weight(1f))
-            if (termError.value != null) {
-                TextButton(onClick = { termError.value = null }) { Text("重试") }
-            }
-            TextButton(onClick = {
-                val tv = terminalViewState.value ?: return@TextButton
-                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-                if (showIme.value) {
-                    tv.requestFocus()
-                    imm.showSoftInput(tv, InputMethodManager.SHOW_IMPLICIT)
-                } else {
-                    imm.hideSoftInputFromWindow(tv.windowToken, 0)
-                }
-                showIme.value = !showIme.value
-            }) {
-                Text(if (showIme.value) "收起键盘" else "弹出键盘")
-            }
-        }
+    Box(Modifier.fillMaxSize().background(CColor.Black)) {
         // 真终端视图（全屏黑底）
-        Box(Modifier.fillMaxSize().weight(1f).background(CColor.Black)) {
-            if (termError.value != null) {
-                Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.Center) {
-                    Text("终端启动失败", color = CColor(0xFFEF5350), fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(8.dp))
-                    Text(termError.value ?: "", color = CColor.White, fontSize = 12.sp)
-                    Spacer(Modifier.height(8.dp))
-                    Text("日志在 Download/QuroAI_logs/termaci_crash_*.txt", color = CColor.Gray, fontSize = 11.sp)
-                }
-            } else {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx ->
-                        val view = TerminalView(ctx, null)
-                        view.setTerminalViewClient(client)
-                        view.isFocusable = true
-                        view.isFocusableInTouchMode = true
-                        view.setBackgroundColor(Color.BLACK)
-                        // 关键：初始化渲染器（Termux 标准步骤）。漏掉会导致 onMeasure 时
-                        // mRenderer 为 null 而 NPE 闪退。
-                        view.setTextSize(14)
+        if (termError.value != null) {
+            Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.Center) {
+                Text("终端启动失败", color = CColor(0xFFEF5350), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text(termError.value ?: "", color = CColor.White, fontSize = 12.sp)
+                Spacer(Modifier.height(8.dp))
+                Text("日志在 Download/QuroAI_logs/termaci_crash_*.txt", color = CColor.Gray, fontSize = 11.sp)
+            }
+        } else {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    val view = TerminalView(ctx, null)
+                    view.setTerminalViewClient(client)
+                    view.isFocusable = true
+                    view.isFocusableInTouchMode = true
+                    view.setBackgroundColor(Color.BLACK)
+                    view.setTextSize(14)
 
-                        try {
-                            // 环境：TERM / HOME / PATH / LANG，使 shell 体验接近 Termux
-                            val env = mutableListOf<String>()
-                            env.add("TERM=xterm-256color")
-                            env.add("HOME=" + ctx.filesDir.absolutePath)
-                            env.add("LANG=en_US.UTF-8")
-                            val sysPath = System.getenv("PATH")
-                            if (!sysPath.isNullOrBlank()) env.add("PATH=$sysPath")
-                            // 优先 bash，回退 sh
-                            val shell = if (Runtime.getRuntime().exec(arrayOf("sh", "-c", "command -v bash")).inputStream.bufferedReader().readLine()?.isNotBlank() == true) "bash" else "/system/bin/sh"
+                    try {
+                        val env = mutableListOf<String>()
+                        env.add("TERM=xterm-256color")
+                        env.add("HOME=" + ctx.filesDir.absolutePath)
+                        env.add("LANG=en_US.UTF-8")
+                        val sysPath = System.getenv("PATH")
+                        if (!sysPath.isNullOrBlank()) env.add("PATH=$sysPath")
+                        val shell = if (Runtime.getRuntime().exec(arrayOf("sh", "-c", "command -v bash")).inputStream.bufferedReader().readLine()?.isNotBlank() == true) "bash" else "/system/bin/sh"
 
-                            val session = TerminalSession(
-                                shell,
-                                ctx.filesDir.absolutePath,
-                                arrayOf(),
-                                env.toTypedArray(),
-                                5000,
-                                client
-                            )
-                            view.attachSession(session)
-                            view.requestFocus()
-                            terminalViewState.value = view
-                        } catch (e: Throwable) {
-                            logCrash(ctx, "TerminalSession init", e)
-                            termError.value = "创建 PTY 会话失败：${e.message}"
-                        }
-                        view
-                    },
-                    onRelease = { view ->
-                        try { view.currentSession?.finishIfRunning() } catch (_: Throwable) {}
+                        val session = TerminalSession(
+                            shell, ctx.filesDir.absolutePath, arrayOf(),
+                            env.toTypedArray(), 5000, client
+                        )
+                        view.attachSession(session)
+                        view.requestFocus()
+                        terminalViewState.value = view
+                    } catch (e: Throwable) {
+                        logCrash(ctx, "TerminalSession init", e)
+                        termError.value = "创建 PTY 会话失败：${e.message}"
                     }
+                    view
+                },
+                onRelease = { view ->
+                    try { view.currentSession?.finishIfRunning() } catch (_: Throwable) {}
+                }
+            )
+        }
+
+        // 顶部可折叠工具条（默认收起，仅占一条小把手，点击展开）
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter)
+                .background(CColor(0xCC000000))
+        ) {
+            // 把手
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .height(28.dp)
+                    .clickable { toolbarExpanded = !toolbarExpanded },
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    if (toolbarExpanded) "▼ 收起" else "▲ Zorv 终端",
+                    color = CColor(0xFFAAAAAA),
+                    fontSize = 11.sp
                 )
             }
+            AnimatedVisibility(visible = toolbarExpanded) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        "真 PTY · bash/sh · ANSI 颜色",
+                        fontSize = 12.sp,
+                        color = CColor(0xFFCCCCCC),
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (termError.value != null) {
+                        TextButton(onClick = { termError.value = null }) { Text("重试", color = CColor(0xFFEF5350)) }
+                    }
+                    IconButton(
+                        onClick = { showHelp = true },
+                        modifier = Modifier.size(32.dp)
+                    ) { Icon(Icons.Filled.Help, contentDescription = "帮助", tint = CColor.White) }
+                    IconButton(
+                        onClick = {
+                            val tv = terminalViewState.value ?: return@IconButton
+                            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                            if (showIme.value) {
+                                tv.requestFocus()
+                                imm.showSoftInput(tv, InputMethodManager.SHOW_IMPLICIT)
+                            } else {
+                                imm.hideSoftInputFromWindow(tv.windowToken, 0)
+                            }
+                            showIme.value = !showIme.value
+                        },
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (showIme.value) Icons.Default.KeyboardHide else Icons.Default.Keyboard,
+                            contentDescription = "切换键盘",
+                            tint = CColor.White
+                        )
+                    }
+                }
+            }
         }
+    }
+
+    if (showHelp) {
+        HelpDialog(onDismiss = { showHelp = false })
     }
 }
 

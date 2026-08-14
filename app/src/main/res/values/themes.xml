@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.TermAci" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.TermAci" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowActionBarOverlay">false</item>
         <item name="android:colorPrimary">#1B5E20</item>
-        <item name="android:colorAccent">#1B5E20</item>
-        <item name="android:statusBarColor">#14401a</item>
+        <item name="android:colorAccent">#00E676</item>
+        <item name="android:statusBarColor">#000000</item>
+        <item name="android:navigationBarColor">#000000</item>
+        <item name="android:windowBackground">@android:color/black</item>
     </style>
 </resources>
